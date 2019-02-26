@@ -7,23 +7,10 @@ const fileStream = new Stream.Readable({
     }
 });
 const Speaker = require('speaker');
-const speaker = new Speaker({
-    channels: 2,
-    bitDepth: 16,
-    sampleRate: 44100
-});
+const speaker = new Speaker();
 const NO_DATA = 0;
 
 let file;
-
-/**
- * Puts the thread to sleep for a certain amount of time.
- * @param {Integer} ms 
- */
-function sleep(ms) 
-{
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
 
 /**
  * Exports the Processor class which contains the clients functionality to 
@@ -86,26 +73,29 @@ module.exports = class Processor
     {
         // Looks for the indeces that have no data in them (which is set to 0).
         let missing = this.chunks.indexOf(NO_DATA);
-        while (missing != -1)
-        {
+        let interval = setInterval(()=>{
             // Prevents the function from overflowing the buffer with requests.  
-            await sleep(0).then(()=>{
-                
-                // Requests the missing packets of the current offset from the server.
-                let data = {
-                    "missing": missing,
-                    "partition": this.getPartitionOffset()
-                }
-                
-                console.log('Packet ' + missing + ' is missing from partition ' + this.getPartitionOffset());
-                let packet = this.makePacket('Missing Packet', data);
+            if(missing == -1)
+            {
+                clearInterval(interval)
+                console.log('No missing');
+                callback();
+                return;
+            }
+            
+            // Requests the missing packets of the current offset from the server.
+            let data = {
+                "missing": missing,
+                "partition": this.getPartitionOffset()
+            }
+            
+            console.log('Packet ' + missing + ' is missing from partition ' + this.getPartitionOffset());
+            let packet = this.makePacket('Missing Packet', data);
 
-                this.client.send(JSON.stringify(packet), serverPort, serverAddress);
-                missing = this.chunks.indexOf(NO_DATA);
-            })
-        }   
-        console.log('No missing');
-        callback();
+            this.client.send(JSON.stringify(packet), serverPort, serverAddress);
+            missing = this.chunks.indexOf(NO_DATA);
+        }, 0)   
+        
     }
 
     /**

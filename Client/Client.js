@@ -78,25 +78,17 @@ client.on('message', (message, remote)=>{
             let offset = defaultPartitionSize * processor.getPartitionOffset();
             let partitionIndex = index - offset;
 
-            console.log('Received Packet ' + index + ' from Partition ' + processor.getPartitionOffset())
-
             // Stores the data if it does not already exist.
             if(processor.chunks[partitionIndex] == NO_DATA)
+            {
                 processor.chunks[partitionIndex] = data;
+            }
 
             // It's possible that we can set a requestInterval timeout here as well that waits 
             // until the next packet is received.
             // If the next packet hasn't been received after a while, then the partition is assumed
             // to be finished, hence processing will commence.
-            // packetTimeout = setTimeout(()=>{
-            //     console.log('No new packets received after ' + REQUEST_INTERVAL + 'ms');
-            //     console.log('Moving on to partition Processing stage.');
-            //     console.log('Processing Partition '  + processor.getPartitionOffset());
-            //     processor.flushPartition(serverAddress, serverPort, body, ()=>{
-            //         console.log('Requesting for Partition '  + processor.getPartitionOffset()); 
-            //         sendPacket (INITIATE_TRANSFER, processor.getPartitionOffset(), remote, true)
-            //     });
-            // }, 1500);
+
             break;
             // WE MISS PACKETS IN HERE BEFORE THE PARTITION IS SAID TO BE FINISHED.
             // THE CLIENT IS THEN PUT INTO A WAITING PHASE
