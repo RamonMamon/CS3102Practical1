@@ -34,11 +34,9 @@ module.exports = class Processor
     constructor(client, filename)
     {
         this.client = client;
-        this.outputBuffer = Buffer.from(''); // Contains the processed chunks
         this.partitionOffset = 0;
         this.partitionCount = 0;
-        this.partitionSize = 0;
-        this.chunks = [];
+        this.chunks;
         this.filename = filename;
         
         file = fs.createWriteStream(filename);
@@ -52,8 +50,6 @@ module.exports = class Processor
      */
     newPartition(size)
     {
-        this.partitionCount = 0;
-        this.partitionSize = 0;
         this.chunks = new Array(size).fill(NO_DATA);
     }
 
@@ -63,7 +59,7 @@ module.exports = class Processor
      * @param {Integer} serverPort
      * @param {Integer} nextPartitionSize
      */
-    flushPartition(serverAddress, serverPort, nextPartitionSize, callback, header, remote, essential)
+    flushPartition(serverAddress, serverPort, nextPartitionSize, callback)
     {
         this.requestMissingPackets(serverAddress, serverPort, ()=>{
             // Waits for the missing packets to be retreived before flushing the buffered packets.
@@ -76,10 +72,8 @@ module.exports = class Processor
             // Creates a new partition of a specified size.
             this.newPartition(nextPartitionSize);
 
-            console.log('Requesting for Partition '  + this.getPartitionOffset()); 
-            callback(header, this.getPartitionOffset(), remote, essential);
+            callback();
         });
-        
     }
 
     /**
@@ -88,38 +82,30 @@ module.exports = class Processor
      * @param {Integer} serverPort
      * @param {function} callback
      */
-    requestMissingPackets(serverAddress, serverPort, callback) 
+    async requestMissingPackets(serverAddress, serverPort, callback) 
     {
         // Looks for the indeces that have no data in them (which is set to 0).
         let missing = this.chunks.indexOf(NO_DATA);
-        if(missing == -1){
-            console.log('No missing');
-            callback();
-        }
-        else if(missing != -1)
+        while (missing != -1)
         {
-            // Requests the missing packets of the current offset from the server.
-            let data = {
-                "missing": missing,
-                "partition": this.getPartitionOffset()
-            }
-            
-            console.log('Packet ' + missing + ' is missing from partition ' + this.getPartitionOffset());
-            let packet = this.makePacket('Missing Packet', data);
+            // Prevents the function from overflowing the buffer with requests.  
+            await sleep(0).then(()=>{
+                
+                // Requests the missing packets of the current offset from the server.
+                let data = {
+                    "missing": missing,
+                    "partition": this.getPartitionOffset()
+                }
+                
+                console.log('Packet ' + missing + ' is missing from partition ' + this.getPartitionOffset());
+                let packet = this.makePacket('Missing Packet', data);
 
-            this.client.send(JSON.stringify(packet), serverPort, serverAddress, (err) =>{
-                if(err)throw err;
-                sleep(0).then(()=>{
-                    this.requestMissingPackets(serverAddress, serverPort,callback);
-                    // console.log('Exiting Callback');
-                })
-                // }); // Prevents the function from overflowing the buffer with requests.  
+                this.client.send(JSON.stringify(packet), serverPort, serverAddress);
+                missing = this.chunks.indexOf(NO_DATA);
             })
-        }
-        
-    }
-    write(chunk){
-        fileStream.push(chunk)
+        }   
+        console.log('No missing');
+        callback();
     }
 
     /**
@@ -159,10 +145,6 @@ module.exports = class Processor
     getPartitionOffset()
     {
         return this.partitionOffset;
-    }
-
-    incrementPartitionCount(){
-        this.partitionCount++;
     }
 }
             

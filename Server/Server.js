@@ -60,19 +60,24 @@ socket.on('error', (err) => {
 })
 
 socket.on('message', (message, remote)=>{
-    // tcpLikeImplementation(message, remote)
     let packet = JSON.parse(message);
     let header = packet.header;
     let data = packet.body;
-
     switch(header)
     {
         case START_TRANSFER:
             // Send buffered File
             console.log('Streaming to ' + remote.address + ':' + remote.port);
             console.log('Sending Partitions...');
-            sendPacket(PACKET_INFO_INDEX, 0, 1, remote);
-            
+            // Sends the file details 
+            let fileDetails = {
+                "totalPackets" : numChunks,
+                "partitionSize" : packetsPerPartition
+            }
+            packet = makePacket(PACKET_INFO_INDEX,fileDetails);
+
+            console.log('Sending File Details')
+            socket.send(JSON.stringify(packet), remote.port, remote.address)
             break;
         case INITIATE_TRANSFER:
             // Sends a specified partition of the file.
@@ -93,6 +98,7 @@ socket.on('message', (message, remote)=>{
     }
 })
 
+// TODO: Can probably change this to include the header as an argument.
 /**
  * Sends a number of packets starting from the stored index.
  * @param {Integer} index 
@@ -105,28 +111,14 @@ function sendPacket(index, partitionIndex, numPackets, remote)
     let partition = filebuffer[partitionIndex]
     let packet;
 
-    if (partitionIndex >= filebuffer.length)
-    {
-        // Notifies the client that the file has been fully transferred
-        packet = makePacket(FILE_TRANSFERED, null)
-        socket.send(JSON.stringify(packet), remote.port, remote.address);
-        console.log('File has been full transmitted.');
-        return;
-    }
-    
     switch(true)
     {
-        case index == PACKET_INFO_INDEX:
-            // Sends the file details 
-            let fileDetails = {
-                "totalPackets" : numChunks,
-                "partitionSize" : packetsPerPartition
-            }
-            packet = makePacket(PACKET_INFO_INDEX,fileDetails);
-
-            console.log('Sending File Details')
-            socket.send(JSON.stringify(packet), remote.port, remote.address)
-            break;    
+        case partitionIndex >= filebuffer.length:
+            // Notifies the client that the file has been fully transferred
+            packet = makePacket(FILE_TRANSFERED, null)
+            socket.send(JSON.stringify(packet), remote.port, remote.address);
+            console.log('File has been full transmitted.');
+            return;
         case index < partition.length:
             // Sends packets starting from an index
             packet = makePacket(PARTITION_PACKET, partition[index]);
@@ -163,7 +155,7 @@ function sendPacket(index, partitionIndex, numPackets, remote)
 function bufferFile()
 {
     let filesize = file.length;
-    let chunkSize = 1024;
+    let chunkSize = 1024 * 15;
     numChunks = Math.ceil(filesize/chunkSize, chunkSize);
     let index = 0; // Chunk index
 
@@ -181,10 +173,9 @@ function bufferFile()
             'index' : index,
             'data' : buffer
         }
-        filebuffer.push(packet);
+        partition.push(packet);
         index++;
         
-        // COMMENT OUT FOR TCP
         if(((index % packetsPerPartition) == 0 && index != 0) || index == numChunks-1)
         {
             // Adds the partition into the filebuffer when it is full or if it is the 
@@ -217,55 +208,3 @@ function sleep(ms)
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function tcpLikeImplementation(message, remote)
-{
-    // console.log(parseInt(message) + " and Packet index " + packetIndex)
-    // When a client asks to be hit up with a song, he shall receive.
-    if(packetIndex >= filebuffer.length) 
-    {
-        // Resets the sent Counter.
-        packetIndex = 0; 
-        socket.send('Package delivered.', remote.port, remote.address);
-        console.log('Package fully transmitted.')
-    }
-    // Waits for a client to request for a file
-    if(message == START_TRANSFER)
-    {
-        // Sends the buffered file starting from the index 0.
-        packetIndex = 0; 
-        console.log('Client from ' + remote.address + ':' + remote.port + ' wants some of the good shiz.');
-
-        tcpSendPacket(packetIndex++, remote);
-    }else if(parseInt(message) == packetIndex)
-    {
-        // Sends a packet if the client successfully receives the previous packet
-        tcpSendPacket(packetIndex++, remote);
-    }else if(parseInt(message) == packetIndex-1)
-    {
-        // Resends a packet that was lost.
-        console.log('Resending portion ' + packetIndex)
-        tcpSendPacket(packetIndex, remote);
-    }    
-    
-}
-
-/**
- * Sends a packet stored at a specific index.
- * @param {Integer} index 
- * @param {Object} remote 
- */
-function tcpSendPacket(index, remote){
-    
-    if(index < filebuffer.length ){
-        console.log('Sending portion ' + index);
-        // Sends the packet ten times for redundancy.
-        // let partition = filebuffer[index];
-        // index++;
-        // console.log('Portion size is ' + packet.length)
-        for (let i = 0; i < 1; i++)
-            socket.send(JSON.stringify(filebuffer[index]), remote.port, remote.address);
-    }
-    else {
-        console.log('Index empty.');
-    }
-}

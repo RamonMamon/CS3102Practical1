@@ -15,8 +15,8 @@ const INITIATE_TRANSFER = 'Initiate Partition Transfer';
 const PARTITION_FINISHED = 'Partition Sent';
 const FILE_TRANSFERED = 'Finished';
 
-const REQUEST_INTERVAL = 1500;
-const RETRY_ATTEMPTS = 4;
+const REQUEST_INTERVAL = 1000;
+const RETRY_ATTEMPTS = 10;
 const NO_DATA = 0;
 
 let serverPort;
@@ -27,6 +27,7 @@ let totalPackets;
 let receivedDetails;
 let defaultPartitionSize;
 let requestInterval;
+let packetTimeout;
 
 (() => {
     let args = process.argv;
@@ -47,41 +48,6 @@ let requestInterval;
 
 
 client.on('message', (message, remote)=>{
-    udpImplementation( message, remote);
-    // tcpLikeImplementation(message,remote)
-});
-
-
-client.on('listening', ()=>{
-    
-    console.log('Client is requesting on ' + client.address().address + ':' + port);
-    console.log('Client is attempting to stream audio from ' + serverAddress + ':' + serverPort);
-    let remote = {
-        'address':serverAddress,
-        'port':serverPort
-    }
-    sendPacket(START_TRANSFER, null, remote, true);
-
-    //TCP
-    // client.send(START_TRANSFER, serverPort, serverAddress);
-    // processor.newPartition(37545)
-})  
-
-/**
- * Error handling.
- */
-client.on('error', (err) => {
-    console.log(err.stack);
-    client.close();
-})
-
-/**
- * TODO: Think of a good comment for this function.
- * @param {Object} message 
- * @param {Object} remote 
- */
-function udpImplementation (message, remote)
-{
     let packet = JSON.parse(message)
     let header = packet.header; 
     let body = packet.body;
@@ -91,11 +57,9 @@ function udpImplementation (message, remote)
         case header == PACKET_INFO_INDEX:
             // Saves the file details.
             clearInterval(requestInterval);
-            totalPackets = body.totalPackets;
+            // totalPackets = body.totalPackets;
             processor.newPartition(body.partitionSize);
             defaultPartitionSize = body.partitionSize;
-            processor.partitionSize = defaultPartitionSize;
-            // receivedDetails = true;
             
             // Requests for the first partition.
             console.log('File details received. File transfer initiated.');
@@ -106,6 +70,7 @@ function udpImplementation (message, remote)
         case header == PARTITION_PACKET:
             // Starts storing the data into a buffer once the file details are received.
             clearInterval(requestInterval);
+            clearTimeout(packetTimeout);
             let index = body.index;
             let data = Buffer.from(body.data);
             
@@ -113,21 +78,36 @@ function udpImplementation (message, remote)
             let offset = defaultPartitionSize * processor.getPartitionOffset();
             let partitionIndex = index - offset;
 
+            console.log('Received Packet ' + index + ' from Partition ' + processor.getPartitionOffset())
+
             // Stores the data if it does not already exist.
-            if(processor.chunks[partitionIndex] == NO_DATA){
-                processor.incrementPartitionCount();
-                processor.chunks[partitionIndex] = data
-            }
+            if(processor.chunks[partitionIndex] == NO_DATA)
+                processor.chunks[partitionIndex] = data;
+
+            // It's possible that we can set a requestInterval timeout here as well that waits 
+            // until the next packet is received.
+            // If the next packet hasn't been received after a while, then the partition is assumed
+            // to be finished, hence processing will commence.
+            // packetTimeout = setTimeout(()=>{
+            //     console.log('No new packets received after ' + REQUEST_INTERVAL + 'ms');
+            //     console.log('Moving on to partition Processing stage.');
+            //     console.log('Processing Partition '  + processor.getPartitionOffset());
+            //     processor.flushPartition(serverAddress, serverPort, body, ()=>{
+            //         console.log('Requesting for Partition '  + processor.getPartitionOffset()); 
+            //         sendPacket (INITIATE_TRANSFER, processor.getPartitionOffset(), remote, true)
+            //     });
+            // }, 1500);
             break;
+            // WE MISS PACKETS IN HERE BEFORE THE PARTITION IS SAID TO BE FINISHED.
+            // THE CLIENT IS THEN PUT INTO A WAITING PHASE
 
         case header == PARTITION_FINISHED:
             // Processes the current partition and creates a new partition of the received Size.
-            console.log('Processing Partition '  + processor.getPartitionOffset()); 
-
-            processor.flushPartition(serverAddress, serverPort, body, sendPacket, INITIATE_TRANSFER, remote, true);
-            
-            // THIS IS BEING CALLED EVEN BEFORE THE PARTITION IS FLUSHED
-            // sendPacket(INITIATE_TRANSFER, processor.getPartitionOffset(), remote, true);
+            console.log('Processing Partition '  + processor.getPartitionOffset());
+            processor.flushPartition(serverAddress, serverPort, body, ()=>{
+                console.log('Requesting for Partition '  + processor.getPartitionOffset()); 
+                sendPacket (INITIATE_TRANSFER, processor.getPartitionOffset(), remote, true)
+            });
             break;
 
         case header == FILE_TRANSFERED:
@@ -142,21 +122,41 @@ function udpImplementation (message, remote)
             console.log('File details not found. Requesting again.')
             sendPacket(PACKET_INFO_INDEX, null, remote, false);
     }
-}
+});
+
+
+client.on('listening', ()=>{
+    console.log('Client is requesting on ' + client.address().address + ':' + port);
+    console.log('Client is attempting to stream audio from ' + serverAddress + ':' + serverPort);
+    let remote = {
+        'address':serverAddress,
+        'port':serverPort
+    }
+    sendPacket(START_TRANSFER, null, remote, true);
+})  
+
+/**
+ * Error handling.
+ */
+client.on('error', (err) => {
+    console.log(err.stack);
+    client.close();
+})
 
 /**
  * Sends a message to the specified server following a specific protocol.
- * @param {String} header is the Protocol message that the message follows
- * @param {Object} body is the data in to be sent to the server
- * @param {Object} remote the server details;
- * @param {Bool} essential Is true if the pa        this.partitionSize = 0;be guaranteed to be received.
+ * @param {String} header Is the Protocol message that the message follows
+ * @param {Object} body Is the data in to be sent to the server
+ * @param {Object} remote The server details.
+ * @param {Bool} essential Is true if the packet is needs guaranteed retreival.
  */
 function sendPacket(header, body, remote, essential)
 {
     let packet = processor.makePacket(header,body);
-    client.send(JSON.stringify(header), remote.port, remote.address)
+    client.send(JSON.stringify(packet), remote.port, remote.address)
     if(essential)
     {
+        // Checks if essential packets have been acknowledged by the server.
         let count = 0;
         requestInterval = setInterval(()=>{
             // Attempts to reconnect to the server after 1500ms
@@ -172,37 +172,5 @@ function sendPacket(header, body, remote, essential)
             }
             count++;
         }, REQUEST_INTERVAL);
-    }
-}
-
-function tcpLikeImplementation(message, remote)
-{
-    
-    if(message == 'Package delivered.')
-    {
-        // Saves the file once the full package has been received.
-        processor.chunks.forEach((element)=>{ 
-            processor.write(element);
-        });
-        // file.end();
-        // console.log('File successfully saved as ' + Buffer.from(filename));
-        console.log('Number of Packets received ' + processor.chunks.length)
-        // Terminates the client
-        processor.close(client);
-        
-    }else
-    {
-        // Stores the packet in a buffer
-        let packet = JSON.parse(message.toString())
-        let data = Buffer.from(packet.data);
-        if(processor.chunks[packet.index] == 0)
-        {
-            processor.chunks.splice(packet.index, 1, data);
-            processor.write(data);
-        }
-        
-        // Sends an ACK to the server.
-        console.log('Received packet ' + packet.index);
-        client.send(packet.index.toString(), remote.port, remote.address);
     }
 }
