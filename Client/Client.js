@@ -1,11 +1,19 @@
 "use strict"
 const dgram = require('dgram');
 const client = dgram.createSocket('udp4');
-const Processor = require('./Processor');
+// const Processor = require('./Processor');
+const fs = require('fs');
+const Stream = require('stream');
+const fileStream = new Stream.Readable({
+    read(size){
+        // Empty body;
+    }
+});
+const Speaker = require('speaker');
+const speaker = new Speaker();
 
 // Client's address information
 const port = 41236;
-// const host = 'localhost';
 
 // Protocol messages
 const START_TRANSFER = 'Start Transfer';
@@ -13,7 +21,8 @@ const PACKET_INFO_INDEX = 'Packet Info';
 const PARTITION_PACKET = 'Partition Packet';
 const INITIATE_TRANSFER = 'Initiate Partition Transfer';
 const PARTITION_FINISHED = 'Partition Sent';
-const FILE_TRANSFERED = 'Finished';
+const FILE_TRANSFERRED = 'Finished';
+const MISSING_PACKET = 'Missing Packet'
 
 const REQUEST_INTERVAL = 1000;
 const RETRY_ATTEMPTS = 10;
@@ -22,12 +31,21 @@ const NO_DATA = 0;
 let serverPort;
 let serverAddress;
 
-let processor;
-let totalPackets;
-let receivedDetails;
+let oldPartitionOffset = 0;
+let partitionOffset = 0;
+
 let defaultPartitionSize;
 let requestInterval;
 let packetTimeout;
+
+let file;
+let filename;
+let chunks;
+let flushing = false;
+let fileFinished = false;
+let timeoutLocked = false;
+
+let startTime, endTime, totalTime;
 
 (() => {
     let args = process.argv;
@@ -40,10 +58,12 @@ let packetTimeout;
 
     serverAddress = args[2];
     serverPort = args[3];
-    let filename = (args.length < 5)? 'output.wav': args[4];
-    processor = new Processor(client, filename);
-
+    filename = (args.length < 5)? 'output.wav': args[4];
+    file = fs.createWriteStream(filename);
+    fileStream.pipe(file);
+    fileStream.pipe(speaker);
     client.bind(port);    
+
 })();
 
 
@@ -58,64 +78,177 @@ client.on('message', (message, remote)=>{
             // Saves the file details.
             clearInterval(requestInterval);
             // totalPackets = body.totalPackets;
-            processor.newPartition(body.partitionSize);
+            // newPartition(body.partitionSize);
             defaultPartitionSize = body.partitionSize;
+            chunks = new Array(body.partitionSize).fill(NO_DATA);
             
             // Requests for the first partition.
             console.log('File details received. File transfer initiated.');
-            console.log('Partition Size is ' + processor.getPartitionSize());
+            console.log('Partition Size is ' + body.partitionSize);
+                
             sendPacket(INITIATE_TRANSFER, 0, remote, true);
+            // packetTimeout = getTimeout();
+            totalTime = new Date();
+            startTime = new Date();
             break;
 
         case header == PARTITION_PACKET:
             // Starts storing the data into a buffer once the file details are received.
-            clearInterval(requestInterval);
-            clearTimeout(packetTimeout);
+            // clearInterval(requestInterval);
+            
             let index = body.index;
             let data = Buffer.from(body.data);
             
             // The index of the packet in the partition
-            let offset = defaultPartitionSize * processor.getPartitionOffset();
+            let offset = defaultPartitionSize * partitionOffset;
             let partitionIndex = index - offset;
 
             // Stores the data if it does not already exist.
-            if(processor.chunks[partitionIndex] == NO_DATA)
+            if(chunks[partitionIndex] == NO_DATA)
             {
-                processor.chunks[partitionIndex] = data;
+                // clearInterval(packetTimeout);
+                // console.log('Received packet ' + (partitionIndex ) + ' from Partition ' + partitionOffset)
+                chunks[partitionIndex] = data;
+                // packetTimeout = getTimeout();
             }
-
-            // It's possible that we can set a requestInterval timeout here as well that waits 
-            // until the next packet is received.
-            // If the next packet hasn't been received after a while, then the partition is assumed
-            // to be finished, hence processing will commence.
-
             break;
-            // WE MISS PACKETS IN HERE BEFORE THE PARTITION IS SAID TO BE FINISHED.
-            // THE CLIENT IS THEN PUT INTO A WAITING PHASE
 
         case header == PARTITION_FINISHED:
             // Processes the current partition and creates a new partition of the received Size.
-            console.log('Processing Partition '  + processor.getPartitionOffset());
-            processor.flushPartition(serverAddress, serverPort, body, ()=>{
-                console.log('Requesting for Partition '  + processor.getPartitionOffset()); 
-                sendPacket (INITIATE_TRANSFER, processor.getPartitionOffset(), remote, true)
+            clearInterval(requestInterval)
+            // clearInterval(packetTimeout);
+            flushPartition(serverAddress, serverPort, body, ()=>{
+                console.log('Requesting for Partition '  + partitionOffset); 
+                sendPacket (INITIATE_TRANSFER, partitionOffset, remote, true);
+                // flushing = false;
+                // packetTimeout = getTimeout();
             });
             break;
 
-        case header == FILE_TRANSFERED:
+        case header == FILE_TRANSFERRED:
             // Once the file is fully received, the client is triggered to close.
+            
+            console.log('Transferred file in ' +  (endTime-totalTime)/1000 + ' seconds');
             clearInterval(requestInterval)
+            clearInterval(packetTimeout);
+            fileFinished = true;
             console.log('File fully received.');
-            processor.close(client);
+            close();
             break;
 
         default:
-            // Checks if the file details have been received, requests for them if not.
-            console.log('File details not found. Requesting again.')
-            sendPacket(PACKET_INFO_INDEX, null, remote, false);
+            console.log('Unknown Command.');
     }
 });
 
+
+function getTimeout(){
+    
+    let interval = setInterval(() => {
+        console.log('Setting Timeout');
+        if(!timeoutLocked && !fileFinished)
+        {
+            console.log('Locking Timeout');
+            timeoutLocked = true;
+
+            if(partitionOffset == oldPartitionOffset)
+            {
+                // Checks if the 
+                console.log('Missed timeout at ' + partitionOffset);
+                flushPartition(serverAddress, serverPort, defaultPartitionSize, ()=>{
+                    console.log('Requesting for Partition '  + partitionOffset); 
+                    let remote = {
+                        'address': serverAddress,
+                        'port': serverPort
+                    };
+                    sendPacket (INITIATE_TRANSFER, partitionOffset, remote, true);
+                    
+                    console.log('Recovered from timeout');
+                });
+            }else
+            {
+                oldPartitionOffset = partitionOffset;
+            }
+            console.log('Unlocking Timeout');
+            timeoutLocked = false;
+            
+        }
+        else{
+            clearInterval(interval)
+            console.log('Timeout Locked');
+        } 
+    },100);
+    return interval;
+}
+
+/**
+ * Fixes any errors in the file and flushes it out to the output buffer.
+ * @param {String} serverAddress
+ * @param {Integer} serverPort
+ * @param {Integer} nextPartitionSize
+ */
+function flushPartition(serverAddress, serverPort, nextPartitionSize, callback)
+{
+    if(flushing == false){
+        flushing = true;
+        requestMissingPackets(serverAddress, serverPort)
+        .then(()=>{
+            // Waits for the missing packets to be retreived before flushing the buffered packets.
+
+            endTime = new Date();
+            let processTime = (endTime - startTime)/1000;
+            // totalTime += processTime;
+            startTime = new Date()
+            console.log('Processed partition ' + partitionOffset + ' in ' + processTime + ' seconds');
+            
+            partitionOffset++;
+            // Writes the processed partition to the the readable stream buffer
+            chunks.forEach((element) =>{
+                fileStream.push(element)
+            });
+
+            // Creates a new partition of a specified size.
+            chunks = new Array(nextPartitionSize).fill(NO_DATA);
+            flushing = false;
+            callback();
+        }).catch(()=>{
+            console.log('Promise unresolved');
+        });
+    }
+}
+
+/**
+ * Requests for any missing packets until the specified index. 
+ * @param {String} serverAddress
+ * @param {Integer} serverPort
+ * @param {function} callback
+ */
+function requestMissingPackets(serverAddress, serverPort) 
+{
+    return new Promise((resolve, reject)=>{
+        // Looks for the indeces that have no data in them (which is set to 0).
+        let missing = chunks.indexOf(NO_DATA);
+        let interval = setInterval(()=>{
+            // Prevents the function from overflowing the buffer with requests.  
+            if(missing == -1)
+            {
+                clearInterval(interval)
+                // console.log('No missing');
+                return resolve();
+            }
+            
+            // Requests the missing packets of the current offset from the server.
+            let data = {
+                "missing": missing,
+                "partition": partitionOffset
+            }
+            let packet = makePacket(MISSING_PACKET, data);
+
+            client.send(JSON.stringify(packet), serverPort, serverAddress);
+            missing = chunks.indexOf(NO_DATA);
+        }, 0)        
+    });
+}
 
 client.on('listening', ()=>{
     console.log('Client is requesting on ' + client.address().address + ':' + port);
@@ -124,8 +257,10 @@ client.on('listening', ()=>{
         'address':serverAddress,
         'port':serverPort
     }
+
     sendPacket(START_TRANSFER, null, remote, true);
 })  
+
 
 /**
  * Error handling.
@@ -144,25 +279,41 @@ client.on('error', (err) => {
  */
 function sendPacket(header, body, remote, essential)
 {
-    let packet = processor.makePacket(header,body);
+    let packet = makePacket(header,body);
     client.send(JSON.stringify(packet), remote.port, remote.address)
     if(essential)
     {
         // Checks if essential packets have been acknowledged by the server.
-        let count = 0;
         requestInterval = setInterval(()=>{
             // Attempts to reconnect to the server after 1500ms
-            console.log('Next partition not received after 1500ms.');
+            // console.log('Next partition not received after 1500ms.');
+            console.log('Timeout on Partition ' + body);
             console.log('Attempting to reconnect...');
             client.send(JSON.stringify(packet), remote.port, remote.address);
-            if(count == RETRY_ATTEMPTS)
-            {
-                // Closes Client after a number of retries.
-                console.log('Reconnection failed after ' + count + ' tries.');
-                clearInterval(requestInterval);
-                processor.close(client);
-            }
-            count++;
-        }, REQUEST_INTERVAL);
+        }, 100);
+    }
+}
+
+/**
+ * Closes the client when the song has finished.
+ * @param {Object} client 
+ */
+function close()
+{
+    fileStream.push(null);
+    console.log('Waiting for audio to finish.')
+    speaker.on('finish', () => {
+        file.end();
+        client.close();
+        console.log('File Outputted as ' + filename);
+        console.log('Closing client.');
+    });
+}
+
+function makePacket(header, body)
+{
+    return {
+        'header': header,
+        'body' : body
     }
 }

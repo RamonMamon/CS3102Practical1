@@ -9,7 +9,7 @@ const PACKET_INFO_INDEX = 'Packet Info';
 const PARTITION_PACKET = 'Partition Packet';
 const INITIATE_TRANSFER = 'Initiate Partition Transfer';
 const PARTITION_FINISHED = 'Partition Sent';
-const FILE_TRANSFERED = 'Finished';
+const FILE_TRANSFERRED = 'Finished';
 const MISSING_PACKET = 'Missing Packet'
 
 // Server port
@@ -47,6 +47,7 @@ socket.on('listening', () => {
     let address = socket.address();
     console.log('Buffering audio file...');
     bufferFile();
+    console.log(filebuffer.length);
     console.log(filename + " hosted on " + address.address + ':' + address.port);
 });
 
@@ -70,7 +71,8 @@ socket.on('message', (message, remote)=>{
             console.log('Sending Partitions...');
             let fileDetails = {
                 "totalPackets" : numChunks,
-                "partitionSize" : packetsPerPartition
+                "partitionSize" : packetsPerPartition,
+                'numPartitions' : filebuffer.length
             }
             packet = makePacket(PACKET_INFO_INDEX,fileDetails);
 
@@ -101,7 +103,7 @@ socket.on('message', (message, remote)=>{
  * Sends a number of packets starting from the stored index.
  * @param {Integer} index 
  * @param {Integer} partitionIndex
- * @param {Integer} numPackets
+ * @param {Bool} sendOne
  * @param {Object} remote 
  */
 function sendPacket(index, partitionIndex, sendOne, remote)
@@ -109,42 +111,56 @@ function sendPacket(index, partitionIndex, sendOne, remote)
     let partition = filebuffer[partitionIndex]
     let packet;
 
-    switch(true)
+    // Sends packets starting from an index
+    if(partitionIndex >= filebuffer.length)
     {
-        case sendOne:
-            packet = makePacket(PARTITION_PACKET, partition[index++]);
-            socket.send(JSON.stringify(packet), remote.port, remote.address);
-            break;
-        case partitionIndex >= filebuffer.length:
-            // Notifies the client that the file has been fully transferred
-            packet = makePacket(FILE_TRANSFERED, null)
-            socket.send(JSON.stringify(packet), remote.port, remote.address);
-            console.log('File has been fully transmitted.');
-            return;
-        case index < partition.length:
-            // Sends packets starting from an index
-            let interval = setInterval(()=>{
-                // console.log('Sending ' + index);
-                if(index >= partition.length)
-                { 
-                    // Sends the information of the next partition once the end of the current
-                    // partition is reached.
-                    clearInterval(interval);
-                    console.log('Partition ' + partitionIndex + ' empty.');
-                    let nextSize = (partitionIndex == filebuffer.length - 1)? 0 : filebuffer[partitionIndex + 1].length;
+        packet = makePacket(FILE_TRANSFERRED, null)
+        socket.send(JSON.stringify(packet), remote.port, remote.address);
+        console.log('File has been fully transmitted.');
+    }else
+    {
+        let interval = setInterval(()=>{
+            if(index >= partition.length)
+            { 
+                // Sends the information of the next partition once the end of the current
+                // partition is reached.
+                clearInterval(interval);
+                console.log('Partition ' + partitionIndex + ' empty.');
+                let nextSize = (partitionIndex == filebuffer.length - 1)? 0 : filebuffer[partitionIndex + 1].length;
+                let header = (partitionIndex == filebuffer.length - 1 )? FILE_TRANSFERRED : PARTITION_FINISHED;
 
-                    packet = makePacket(PARTITION_FINISHED, nextSize);
-                }else
-                    packet = makePacket(PARTITION_PACKET, partition[index++]);
-                
-                socket.send(JSON.stringify(packet), remote.port, remote.address);
-            }, 0);
+                // send  Partition index as body for concurrent thing
+                packet = makePacket(header, nextSize);
+            }else
+            {
+                if(sendOne) clearInterval(interval);
+                packet = makePacket(PARTITION_PACKET, partition[index++]);            
+            }
             
-            break;
-        default:
-            // Notifies the client that the partition is empty by default.
-            console.log('Reaches Default');
+            socket.send(JSON.stringify(packet), remote.port, remote.address);
+        }, 0);
     }
+
+    // switch(true)
+    // {
+    //     case partitionIndex >= filebuffer.length:
+    //         // Notifies the client that the file has been fully transferred
+    //         packet = makePacket(FILE_TRANSFERRED, null)
+    //         socket.send(JSON.stringify(packet), remote.port, remote.address);
+    //         console.log('File has been fully transmitted.');
+    //         return;
+    //     case sendOne:
+    //         packet = makePacket(PARTITION_PACKET, partition[index++]);
+    //         socket.send(JSON.stringify(packet), remote.port, remote.address);
+    //         break;
+    //     case index < partition.length:
+            
+            
+    //         break;
+    //     default:
+    //         // Notifies the client that the partition is empty by default.
+    //         console.log('Reaches Default');
+    // }
 }
 
 /**
@@ -154,14 +170,13 @@ function sendPacket(index, partitionIndex, sendOne, remote)
 function bufferFile()
 {
     let filesize = file.length;
-    let chunkSize = 1024*15;
+    let chunkSize = 1024 * 15;
     numChunks = Math.ceil(filesize/chunkSize, chunkSize);
     let index = 0; // Chunk index
 
     // Divides the number of packets into percentages.
     const numPartitions = 100;
     packetsPerPartition = Math.ceil(numChunks/numPartitions);
-    console.log(packetsPerPartition);
     let partition = new Array();
     
     
