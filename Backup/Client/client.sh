@@ -4,16 +4,13 @@
 # you should edit these variables to work with your code.
 
 # the commands that run your program, e.g.,
-CLIENT="node ./Client/Client.js"
+CLIENT="node ../Client/Client.js"
 #SERVER="myclient.py"
 # default host
-
-
 HOST=klovia.cs.st-andrews.ac.uk
-
-PORT=29999
+PORT=41236
 # the file name that is written to
-FILENAME=""
+FILENAME="output.wav"
 
 # DO NOT EDIT BELOW THIS LINE
 

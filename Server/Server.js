@@ -12,25 +12,26 @@ const PARTITION_FINISHED = 4;
 const FILE_TRANSFERRED = 5;
 const MISSING_PACKET = 6;
 
+const UNACKEDINTERVAL = 100;
+
 // Server port
 let port;
 
 // File Information
 let path = './AudioFiles/'
-let filename;
-let file;
+let filename, file;
 let filebuffer = [];
-let packetsPerPartition;
-let numChunks;
-
-let resendUnacked;
 let missedPartition = 0;
 let missedPacket = 0;
+let packetsPerPartition;
+
+// Timeout for Unacked Packets
+let resendUnacked;
 
 (function (){
     let args = process.argv;
     // If the number of args is less than 4 then throw error.
-    if (args.length < 4)
+    if (args.length != 4)
     {
         console.log('Usage: node Server.js <Server Port> <Filename>')
         process.exit(0);
@@ -72,9 +73,12 @@ socket.on('message', (message, remote)=>{
             console.log('Streaming to ' + remote.address + ':' + remote.port);
             console.log('Sending Partitions...');
 
-            let numberOfPackets = Buffer.allocUnsafe(4);
-            numberOfPackets.writeUInt16BE(packetsPerPartition);
-            packet = makePacket(PACKET_INFO_INDEX,numberOfPackets);
+            let numberOfPackets = createBuffer(packetsPerPartition, 4);
+            let numberOfPartitions = createBuffer(filebuffer.length, 4);
+            let length = numberOfPackets.length + numberOfPartitions.length;
+
+            let essentialInfo = Buffer.concat([numberOfPackets, numberOfPartitions], length);
+            packet = makePacket(PACKET_INFO_INDEX,essentialInfo);
 
             console.log('Sending File Details')
             socket.send(packet, remote.port, remote.address)
@@ -89,11 +93,11 @@ socket.on('message', (message, remote)=>{
                 resendUnacked = setInterval(()=>{
                     console.log('Timed out at ' + missedPartition);
                     sendPacket(missedPacket, missedPartition, false, remote);
-                }, 100)
+                }, UNACKEDINTERVAL)
+
                 console.log('Initiate Transfer of partition ' + data)
                 sendPacket(0, data, false, remote);
             }
-            
             break;
         case header == MISSING_PACKET:
             // Sends the missed packets.
@@ -106,6 +110,8 @@ socket.on('message', (message, remote)=>{
         case header == FILE_TRANSFERRED:
             console.log('File has been fully transmitted.');
             clearInterval(resendUnacked);
+            missedPacket = 0;
+            missedPartition = 0;
             break;
 
         default:
@@ -124,14 +130,12 @@ function sendPacket(index, partitionIndex, sendOne, remote)
 {
     let partition = filebuffer[partitionIndex]
     let packet;
-
     if(index >= partition.length)
     { 
         // Sends the information of the next partition once the end of the current partition is reached.
         let header = (partitionIndex == filebuffer.length - 1 )? FILE_TRANSFERRED : PARTITION_FINISHED;
         let nextSize = (partitionIndex == filebuffer.length - 1)? 0 : filebuffer[partitionIndex + 1].length;
-        let nextSizeBuffer = Buffer.allocUnsafe(4);
-        nextSizeBuffer.writeUInt16BE(nextSize);
+        let nextSizeBuffer = createBuffer(nextSize, 4);
         
         packet = makePacket(header, nextSizeBuffer);
         socket.send(packet, remote.port, remote.address,(err)=>{
@@ -159,7 +163,7 @@ function bufferFile()
 {
     let filesize = file.length;
     let chunkSize = 1024;
-    numChunks = Math.ceil(filesize/chunkSize, chunkSize);
+    let numChunks = Math.ceil(filesize/chunkSize, chunkSize);
     let chunkIndex = 0; 
 
     // Divides the number of packets into percentages.
@@ -175,8 +179,7 @@ function bufferFile()
         let fileSlice = file.slice(offset, chunkSize + offset);
 
         // Writes the index to a 4 byte sequence number.
-        let indexBuffer = Buffer.allocUnsafe(4);
-        indexBuffer.writeUInt16BE(chunkIndex);
+        let indexBuffer = createBuffer(chunkIndex, 4);
         let totalLength = indexBuffer.length + fileSlice.length;
 
         // Stores the new packet into the partition
@@ -206,4 +209,15 @@ function makePacket(header, body)
     headerBuffer.writeUInt8(header);
     if(body == null) return headerBuffer;
     return Buffer.concat([headerBuffer, body], (headerBuffer.length + body.length))
+}
+
+/**
+ * Creates a 16-bit unsigned buffer and fills it with data.
+ * @param {Integer} data 
+ * @param {Integer} length 
+ */
+function createBuffer(data, length){
+    let newBuffer = Buffer.allocUnsafe(length);
+    newBuffer.writeUInt16BE(data);
+    return newBuffer;
 }

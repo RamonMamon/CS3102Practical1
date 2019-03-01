@@ -1,7 +1,6 @@
 "use strict"
 const dgram = require('dgram');
 const client = dgram.createSocket('udp4');
-// const Processor = require('./Processor');
 const fs = require('fs');
 const Stream = require('stream');
 const fileStream = new Stream.Readable({
@@ -27,25 +26,32 @@ const MISSING_PACKET = 6;
 const REQUEST_INTERVAL = 1000;
 const NO_DATA = 0;
 
-// Server Info
+// Server details
 let serverPort;
 let serverAddress;
 
+// File details
+let file, chunks;
+let filename = null;
 let partitionOffset = 0;
-let defaultPartitionSize;
-let requestInterval;
+let defaultPartitionSize = 0;
+let totalPartitions = 0;
 
-let file;
-let filename;
-let chunks;
+// Locks
+let receivedFileInfo = false;
 let flushing = false;
+let finished = false;
 
+// Time statistics
 let startTime, endTime, totalTime;
+
+// Timeout
+let requestInterval;
 
 (() => {
     let args = process.argv;
     // If the number of args is less than 4 then throw error.
-    if (args.length < 4)
+    if (args.length < 3 || args.length > 5)
     {
         console.log('Usage: node Client.js <Server Address> <Server Port> [Optional: FileName.wav]')
         process.exit(0);
@@ -53,13 +59,39 @@ let startTime, endTime, totalTime;
 
     serverAddress = args[2];
     serverPort = args[3];
-    filename = (args.length < 5)? 'output.wav': args[4];
-    file = fs.createWriteStream(filename);
-    fileStream.pipe(file);
-    fileStream.pipe(speaker);
+    if(args.length == 5)
+    {
+        // If a filename is specified, download.
+        filename = args[4];
+        file = fs.createWriteStream(filename);
+        fileStream.pipe(file);
+    }else if(args.length == 4)
+    {
+        // If a filename is not specified, stream
+        fileStream.pipe(speaker);
+    }    
     client.bind(port);    
 })();
 
+client.on('listening', ()=>{
+    console.log('Client is requesting on ' + client.address().address + ':' + port);
+    console.log('Client is attempting to stream audio from ' + serverAddress + ':' + serverPort);
+    let remote = {
+        'address':serverAddress,
+        'port':serverPort
+    }
+
+    // Sends handshake
+    sendPacket(START_TRANSFER, null, remote, true);
+})  
+
+/**
+ * Error handling.
+ */
+client.on('error', (err) => {
+    console.log(err.stack);
+    client.close();
+})
 
 client.on('message', (message, remote)=>{
     let header = message.slice(0,1).readUInt8(0);
@@ -73,7 +105,9 @@ client.on('message', (message, remote)=>{
             let partitionSize = message.slice(1,5).readUInt16BE(0);
             defaultPartitionSize = partitionSize;
             chunks = new Array(partitionSize).fill(NO_DATA);
-            
+            totalPartitions = message.slice(5).readUInt16BE(0);
+            receivedFileInfo = true;
+
             // Requests for the first partition.
             console.log('File details received. File transfer initiated.');
             console.log('Partition Size is ' + partitionSize);
@@ -87,7 +121,9 @@ client.on('message', (message, remote)=>{
             break;
 
         case header == PARTITION_PACKET:
-            // Starts storing the data into a buffer once the file details are received.            
+            // Starts storing the data into a buffer once the file details are received.
+            if(!receivedFileInfo) return;
+            clearInterval(requestInterval)
             let index = message.slice(1, 5).readUInt16BE(0);
             let data = message.slice(5);
             
@@ -96,24 +132,21 @@ client.on('message', (message, remote)=>{
             let partitionIndex = index - offset;
 
             // Stores the data if it does not already exist.
-            if(chunks[partitionIndex] == NO_DATA)
+            if(chunks[partitionIndex] == NO_DATA )
                 chunks[partitionIndex] = data;
             
             break;
 
         case header == PARTITION_FINISHED:
             // Processes the current partition and creates a new partition of the received Size.
-            clearInterval(requestInterval)
-
+            if(!receivedFileInfo) return;
             let missing = chunks.indexOf(NO_DATA);
+            
             if(missing > -1)
-            {
+            {   
                 // Sends a negative acknowledgement for any missing packets.
-                let missingBuffer = Buffer.allocUnsafe(4);
-                let partitionBuffer = Buffer.allocUnsafe(4);
-
-                missingBuffer.writeUInt16BE(missing);
-                partitionBuffer.writeUInt16BE(partitionOffset);
+                let missingBuffer = createBuffer(missing, 4);
+                let partitionBuffer = createBuffer(partitionOffset, 4);
                 let length = missingBuffer.length + partitionBuffer.length;
 
                 let data = Buffer.concat([missingBuffer, partitionBuffer], length);
@@ -122,12 +155,11 @@ client.on('message', (message, remote)=>{
             {
                 // Flushes the partition if it is complete.
                 let nextSize = message.slice(1,5).readUInt16BE(0);
-
+                
                 flushPartition(nextSize, ()=>{
                     console.log('Requesting for Partition '  + partitionOffset); 
 
-                    let partitionBuffer = Buffer.allocUnsafe(4);
-                    partitionBuffer.writeUInt16BE(partitionOffset);
+                    let partitionBuffer = createBuffer(partitionOffset, 4);
                     sendPacket (INITIATE_TRANSFER, partitionBuffer, remote, false);
                 });
             }
@@ -135,8 +167,10 @@ client.on('message', (message, remote)=>{
 
         case header == FILE_TRANSFERRED:
             // Once the file is fully received, the client is triggered to close.
-            sendPacket (FILE_TRANSFERRED, null, remote, false);
-            close();
+            if(partitionOffset != totalPartitions-1) return;
+            client.send(makePacket(FILE_TRANSFERRED, null), remote.port, remote.address, ()=>{
+                close();
+            });
             break;
 
         default:
@@ -154,6 +188,7 @@ function flushPartition(nextPartitionSize, callback)
 {
     if(flushing == false){
         // Waits for the missing packets to be retreived before flushing the buffered packets.
+        
         flushing = true;
         
         endTime = new Date();
@@ -175,25 +210,6 @@ function flushPartition(nextPartitionSize, callback)
     }
 }
 
-client.on('listening', ()=>{
-    console.log('Client is requesting on ' + client.address().address + ':' + port);
-    console.log('Client is attempting to stream audio from ' + serverAddress + ':' + serverPort);
-    let remote = {
-        'address':serverAddress,
-        'port':serverPort
-    }
-
-    sendPacket(START_TRANSFER, null, remote, true);
-})  
-
-/**
- * Error handling.
- */
-client.on('error', (err) => {
-    console.log(err.stack);
-    client.close();
-})
-
 /**
  * Sends a message to the specified server following a specific protocol.
  * @param {String} header Is the Protocol message that the message follows
@@ -209,7 +225,7 @@ function sendPacket(header, body, remote, essential)
     {
         // Checks if essential packets have been acknowledged by the server.
         requestInterval = setInterval(()=>{
-            console.log('Timeout on Partition ' + body);
+            console.log('Timed out.');
             console.log('Attempting to reconnect...');
             client.send(packet, remote.port, remote.address);
         }, REQUEST_INTERVAL);
@@ -222,19 +238,26 @@ function sendPacket(header, body, remote, essential)
  */
 function close()
 {
-    clearInterval(requestInterval)
-    console.log('Transferred file in ' + (endTime-totalTime)/1000 + ' seconds');
-    console.log('File fully received.');
+    if(!finished)
+    {
+        // Only allows the client to be closed once.
+        finished = true
+        clearInterval(requestInterval)
+        console.log('Transferred file in ' + (endTime-totalTime)/1000 + ' seconds');
+        console.log('File fully received.');
 
-    // Ends the read stream.
-    fileStream.push(null);
-    console.log('Waiting for audio to finish.');
-    speaker.on('finish', ()=>{
-        console.log('File Outputted as ' + filename);
+        // Ends the read stream.
+        fileStream.push(null);
+        if(filename != null)
+        {
+            console.log('File outputted as ' + filename);
+            file.end();
+        }
+        else
+            console.log('Waiting for audio to finish.');
         console.log('Closing client.');
-        file.end();
         client.close();
-    })
+    }
 }
 
 /**
@@ -249,4 +272,15 @@ function makePacket(header, body)
     headerBuffer.writeUInt8(header);
     if(body == null) return headerBuffer;
     return Buffer.concat([headerBuffer, body], (headerBuffer.length + body.length));
+}
+
+/**
+ * Creates a 16-bit unsigned buffer and fills it with data.
+ * @param {Integer} data 
+ * @param {Integer} length 
+ */
+function createBuffer(data, length){
+    let newBuffer = Buffer.allocUnsafe(length);
+    newBuffer.writeUInt16BE(data);
+    return newBuffer;
 }

@@ -6,12 +6,12 @@
 
 
 # the commands that run your program, e.g.,
-SERVER="node ./Server/Server.js"
+SERVER="node Server/Server.js"
 #SERVER="myserver.py"
 # default port
-PORT=29999
+PORT=41235
 # the audio file
-AUDIOFILE="Beastie_Boys_-_Now_Get_Busy.wav"
+AUDIOFILE="../AudioFiles/BeastieBoys.wav"
 
 # DO NOT EDIT BELOW THIS LINE
 

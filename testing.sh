@@ -19,15 +19,15 @@
 
 # default parameters
 # host where server is running
-SERVER_HOST=138.251.29.70
+SERVER_HOST=klovia.cs.st-andrews.ac.uk
 # port of server
-SERVER_PORT=41235
+SERVER_PORT=23456
 # the audio file that will be served
-AUDIO_FILE="location.wav"
+AUDIO_FILE="Beastie_Boys_-_Now_Get_Busy.wav"
 # are we going to use netem? If not set, then no network parameters are changed
-NETEM_TEST=1
+NETEM_TEST=0
 # netem parameters for testing (make sure to enclose in "" when running)
-NETEM_PARAMS="loss 100%"
+NETEM_PARAMS="loss 0.1%"
 # the netem interface (see the practical instructions for how to determine this)
 NETEM_INTERFACE="enp4s0"
 # get command-line parameters
@@ -68,7 +68,7 @@ if [[ ${NETEM_TEST} -eq 1 ]]; then
     LOCAL_IP=$(hostname -i)
     echo "setting up netem from ${LOCAL_IP} to ${SERVER_HOST} on interface ${NETEM_INTERFACE} with parameters ${NETEM_PARAMS}"
     ssh -n -f ${SERVER_HOST} "sh -c 'cd ${CURRENT_DIR}; nohup ./netem_wrapper.sh ${NETEM_INTERFACE} ${LOCAL_IP} ${NETEM_PARAMS} > /dev/null 2>&1 &'"
-    # ssh ${SERVER_HOST} ${CURRENT_DIR}/netem_wrapper.sh ${NETEM_INTERFACE} ${LOCAL_IP} ${NETEM_PARAMS}
+#ssh ${SERVER_HOST} ${CURRENT_DIR}/netem_wrapper.sh ${NETEM_INTERFACE} ${LOCAL_IP} ${NETEM_PARAMS}
 fi
 
 # iii) run client playing back
